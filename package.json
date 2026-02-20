@@ -1,0 +1,23 @@
+{
+  "name": "opencode-commander",
+  "version": "0.1.0",
+  "description": "Orchestrate AI coding agents across multiple repositories",
+  "type": "module",
+  "bin": {
+    "opencode-commander": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.2.9"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22",
+    "typescript": "^5.7"
+  },
+  "license": "MIT"
+}
