@@ -318,116 +318,198 @@ That's it. No queue, no polling, no MCP server, no priority system, no human-in-
 
 ### Bootstrap implementation plan
 
-**Step 1: Project scaffolding (day 1)**
-- Create `ungood/opencode-commander` repo
-- `flake.nix` with agentkit, TypeScript toolchain, opencode
-- Basic `package.json` with TypeScript, tsx for running
+**Step 1: Project scaffolding** -- DONE
+- Created `ungood/opencode-commander` repo
+- `flake.nix` with flake-parts, TypeScript toolchain, opencode, bun, gh, op
+- `package.json` with bun, @opencode-ai/sdk, TypeScript
 - `AGENTS.md` describing the project so opencode can work on it
-- Verify: `nix develop` gives you a shell with opencode + node
+- CLI skeleton, all core modules (cli, run, github, container, agent, log)
+- Verified: `nix develop` gives a shell with opencode + bun + node, `bun run typecheck` passes
 
-**Step 2: Container script (day 2)**
-- Shell script or minimal TS that:
-  - `podman run` with a Nix-enabled base image
-  - Mounts/clones a repo at `/workspace`
-  - Runs `nix develop --command opencode serve --port 4096 --hostname 0.0.0.0`
-- `op run` wraps the podman invocation to inject secrets
-- Verify: you can `curl http://localhost:<port>/global/health` from the host
-
-**Step 3: opencode SDK integration (day 3)**
-- TypeScript code that:
-  - Connects to a running opencode server via `createOpencodeClient`
-  - Creates a session
-  - Sends a prompt
-  - Subscribes to SSE events, waits for session to finish
-  - Detects success or failure
-- Verify: send "create a file called hello.txt with 'hello world'" and confirm it works
-
-**Step 4: Wire it together as `commander run` (day 4)**
-- CLI entry point: `commander run <owner/repo>#<issue-number>`
-- Fetches issue title + body via `gh issue view --json`
-- Spawns container with repo cloned, branch created
-- Sends constructed prompt to opencode
-- On completion: pushes branch, runs `gh pr create`
-- On failure: prints error, exits non-zero
-- Verify: file an issue on opencode-commander, run the command, get a PR
-
-**Step 5: Self-improvement test (day 5)**
-- File a real issue on the opencode-commander repo: "Add a --timeout flag to the run command"
-- Run `commander run ungood/opencode-commander#1`
-- Review the PR
-- If it works: the system is bootstrapped
-- If it doesn't: fix the failure manually, iterate
+**Steps 2-5: remaining bootstrap work** -- see milestones below
 
 ### After bootstrap
 
 Once the bootstrap loop works, subsequent milestones can be partially self-built. The workflow becomes:
 
-1. File an issue describing the feature (e.g., "Add SQLite task queue")
-2. Run `commander run ungood/opencode-commander#N`
+1. File an issue describing the feature
+2. Run `opencode-commander run ungood/opencode-commander#N`
 3. Review the PR, merge or request changes
 4. Repeat
 
-The original milestones remain the roadmap, but they're restructured below to reflect what bootstrap already covers.
+## Agent-Sized Milestones
 
-## Milestones
+Each milestone below is scoped so that a single opencode agent session can complete it. They are ordered by dependency -- later milestones depend on earlier ones being merged.
 
-### M0: Bootstrap MVP (Week 1)
-- Project scaffolding with TypeScript + Nix flake + agentkit
-- Single-command `commander run <owner/repo>#<issue>` CLI
-- Podman container lifecycle (create with nix, run opencode, tear down)
-- opencode SDK integration (start server, send prompt, wait for completion)
-- GitHub issue fetch + PR creation (via `gh` CLI)
-- `op run` for secrets injection
-- **Exit criteria:** file an issue on the commander repo, get a working PR back
+### M0.1: Use the official opencode Docker image for containers
 
-### M1: Queue + Multi-task (Week 2-3)
-- SQLite task queue with basic CRUD
-- `commander queue` / `commander status` CLI commands
-- Sequential task processing (dequeue, run, repeat)
-- Configurable concurrency (multiple containers)
-- Basic retry on failure (up to N attempts)
-- Container resource limits (CPU, memory)
+The current `container.ts` uses `nixos/nix:latest` as the base image and runs `nix develop` inside it to get opencode. This is slow and fragile. opencode publishes an official Docker image (`ghcr.io/anomalyco/opencode`) that already has the opencode binary. Switch to using that image directly, which eliminates the need for Nix inside the container for the bootstrap case. Keep `nix develop` as a future optimization for project-specific toolchains.
 
-### M2: GitHub Integration (Week 3-4)
-- GitHub poller: repo discovery via topic, issue detection via labels
-- Issue-to-task pipeline: normalize issues into task queue entries
-- Issue comment updates (status changes, completion, failure)
-- Label management on issues
-- `commander watch` -- long-running daemon mode
+**Files:** `src/container.ts`
+**Verify:** `bun run typecheck` passes. The container startup script should use the official image and run `opencode serve` directly.
 
-### M3: MCP Server + Human Loop (Week 5-6)
-- MCP server exposing commander tools to opencode
-- Human-in-the-loop: detect agent questions, post to issue, resume on reply
-- Stuck detection and timeout handling
+### M0.2: Add a configuration module
 
-### M4: PR Review Loop + Polish (Week 7-8)
-- PR review detection (requested changes on agent PRs)
-- Follow-up task creation with review context
-- Comprehensive logging and error reporting
-- Documentation
+Extract hardcoded values (container defaults, timeouts, image name, resource limits) into a `src/config.ts` module that loads from environment variables and/or a `commander.toml` config file. The run command and container module should read from this config instead of using inline defaults.
 
-### M5: Hardening (Ongoing)
-- Home lab deployment (NixOS container host)
-- Orphan container reconciliation on startup
-- Webhook-based GitHub events (replace polling for faster response)
-- Shared Nix store volume for faster `nix develop`
-- Pre-built per-repo images for frequently-used repos
-- Multi-issue PR batching
-- Cost tracking per task with budget guardrails
-- Metrics and observability (Prometheus/Grafana or similar)
-- Multiple LLM provider fallback strategies
+**Files:** `src/config.ts` (new), `src/run.ts`, `src/container.ts`, `src/cli.ts`, `package.json` (add toml parser dep)
+**Verify:** `bun run typecheck` passes. Config values can be overridden via env vars (e.g. `COMMANDER_TIMEOUT=60`).
+
+### M0.3: Add error handling and structured exit codes
+
+Improve error handling across the codebase. Add specific error classes (e.g. `ContainerError`, `AgentError`, `GitHubError`) so failures are diagnosable. Ensure the CLI prints a clear summary on failure and exits with distinct codes (1=agent failure, 2=container failure, 3=github failure, etc).
+
+**Files:** `src/errors.ts` (new), `src/cli.ts`, `src/run.ts`, `src/container.ts`, `src/agent.ts`, `src/github.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M0.4: Handle git authentication inside containers
+
+The container needs to authenticate with GitHub to clone private repos and push branches. Add logic to pass the `GITHUB_TOKEN` env var into the container and configure git to use it for HTTPS auth (via `git credential helper` or URL rewriting). Test that the startup script can clone a repo and push a branch.
+
+**Files:** `src/container.ts`
+**Verify:** `bun run typecheck` passes. The startup script configures `git config credential.helper` or uses `https://<token>@github.com` URL scheme.
+
+### M0.5: Add an integration test harness
+
+Create a test script that validates the end-to-end flow without needing a real GitHub issue. It should: (1) create a container with a small test repo, (2) start opencode, (3) send a trivial prompt ("create hello.txt"), (4) verify the file was created, (5) tear down. Use Bun's built-in test runner.
+
+**Files:** `tests/integration.test.ts` (new), `package.json` (add test script)
+**Verify:** `bun test` runs the integration test (may require podman to be running).
+
+### M1.1: Add SQLite task queue schema and CRUD
+
+Create `src/queue.ts` with a SQLite-backed task queue. Use `bun:sqlite` (Bun's built-in SQLite). Define the task schema from the plan (id, github_issue_url, repo, title, body, priority, status, created_at, updated_at, attempts, parent_task_id, container_id, pr_url). Implement CRUD operations: `enqueue()`, `dequeue()`, `getTask()`, `updateTask()`, `listTasks()`.
+
+**Files:** `src/queue.ts` (new), `package.json` (no new deps -- use bun:sqlite)
+**Verify:** `bun run typecheck` passes. Add basic unit tests in `tests/queue.test.ts`.
+
+### M1.2: Add `queue` and `status` CLI subcommands
+
+Add two new CLI subcommands:
+- `opencode-commander queue` -- list tasks in the queue with their status, priority, and age
+- `opencode-commander status` -- show overall system status (queue depth, any running containers)
+
+Wire these into the existing CLI argument parser in `src/cli.ts`.
+
+**Files:** `src/cli.ts`, `src/queue.ts` (import)
+**Verify:** `bun run typecheck` passes. `bun run dev -- queue` and `bun run dev -- status` produce output.
+
+### M1.3: Sequential task processor
+
+Create a `src/processor.ts` module that implements a processing loop: dequeue a task from the SQLite queue, run it through the existing `run()` pipeline, update the task status, repeat. Add a `opencode-commander process` CLI subcommand that runs until the queue is empty.
+
+**Files:** `src/processor.ts` (new), `src/cli.ts`, `src/queue.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M1.4: Retry logic and failure handling
+
+When a task fails, increment its `attempts` counter and re-enqueue it with a backoff delay (configurable max attempts, default 3). Add a `failed` terminal state for tasks that exhaust retries. Update the processor to check attempts before re-enqueuing.
+
+**Files:** `src/processor.ts`, `src/queue.ts`
+**Verify:** `bun run typecheck` passes. Add tests for retry logic in `tests/queue.test.ts`.
+
+### M1.5: Concurrent container pool
+
+Add concurrency support to the processor. Manage a pool of up to `max_concurrent` containers (configurable, default 4). Use a semaphore or worker pool pattern. The processor should dequeue and dispatch tasks in parallel up to the concurrency limit.
+
+**Files:** `src/processor.ts`, `src/config.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M2.1: GitHub repo discovery via topic
+
+Create `src/poller.ts` with a function that discovers repos opted-in to commander via the GitHub topic `opencode-commander`. Use `gh api` to search for repos with this topic that the authenticated user has access to. Return a list of `owner/repo` strings.
+
+**Files:** `src/poller.ts` (new), `src/github.ts` (add search helper)
+**Verify:** `bun run typecheck` passes.
+
+### M2.2: Issue detection and task creation pipeline
+
+Extend `src/poller.ts` to scan discovered repos for issues with the trigger label (e.g. `agent`). For each matching issue, check if a task already exists in the queue; if not, create one. Normalize issue data into task queue entries with priority derived from labels (`priority/critical`, `priority/high`, etc).
+
+**Files:** `src/poller.ts`, `src/queue.ts`, `src/github.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M2.3: Issue lifecycle management
+
+Add functions to manage issue labels and status comments throughout the task lifecycle: add `agent/queued` label when enqueued, `agent/running` when dispatched, `agent/done` or `agent/failed` on completion. Post status comments at each transition. Update `src/run.ts` to call these lifecycle hooks.
+
+**Files:** `src/github.ts`, `src/run.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M2.4: `watch` daemon mode
+
+Add a `opencode-commander watch` CLI subcommand that runs a long-lived loop: poll for new issues (configurable interval, default 30s), enqueue tasks, and process them. Combine the poller from M2.1-M2.2 with the processor from M1.3. Handle graceful shutdown on SIGINT/SIGTERM.
+
+**Files:** `src/cli.ts`, `src/poller.ts`, `src/processor.ts`
+**Verify:** `bun run typecheck` passes. `bun run dev -- watch` starts polling and can be stopped with ctrl-c.
+
+### M3.1: MCP server scaffold with status and queue tools
+
+Create `src/mcp.ts` that implements an MCP server exposing `commander_status` and `commander_queue` tools. Use the `@modelcontextprotocol/sdk` npm package. The tools should read from the SQLite queue and return formatted results.
+
+**Files:** `src/mcp.ts` (new), `src/cli.ts` (add `mcp` subcommand), `package.json` (add @modelcontextprotocol/sdk)
+**Verify:** `bun run typecheck` passes.
+
+### M3.2: MCP dispatch, pause, and resume tools
+
+Add `commander_dispatch`, `commander_pause`, `commander_resume`, `commander_logs`, and `commander_repos` tools to the MCP server. `dispatch` manually enqueues a task. `pause`/`resume` control the processor. `logs` streams container output. `repos` lists monitored repos.
+
+**Files:** `src/mcp.ts`, `src/processor.ts` (add pause/resume support)
+**Verify:** `bun run typecheck` passes.
+
+### M3.3: Human-in-the-loop via issue comments
+
+Monitor SSE events from running agents to detect when the agent uses the `question` tool or gets stuck waiting for input. When detected: post the agent's question as a comment on the GitHub issue, set task status to `waiting_human`, and keep the container alive. When the poller detects a human reply, forward it to the opencode session.
+
+**Files:** `src/agent.ts`, `src/poller.ts`, `src/run.ts`, `src/github.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M3.4: Stuck detection and timeout improvements
+
+Enhance the agent monitoring to detect stuck agents: if no tool calls or file changes for a configurable duration (default 5 min), abort the session and mark the task as failed. Add per-priority timeout overrides (critical=60min, high=45min, medium=30min, low=15min). Log detailed diagnostics when a timeout occurs.
+
+**Files:** `src/agent.ts`, `src/config.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M4.1: PR review detection and follow-up tasks
+
+Add a function to `src/poller.ts` that detects "request changes" reviews on PRs labeled `agent-pr`. When found, create a follow-up task linked to the parent task, including the review comments as context in the prompt. The new task checks out the existing PR branch rather than creating a new one.
+
+**Files:** `src/poller.ts`, `src/queue.ts`, `src/agent.ts` (update prompt builder), `src/container.ts` (support existing branch checkout)
+**Verify:** `bun run typecheck` passes.
+
+### M4.2: Comprehensive logging and error reporting
+
+Replace the basic `log.ts` with structured JSON logging. Add request/response logging for all `gh` CLI calls and SDK interactions. Add a `--log-file` CLI option to write logs to a file. Add a `commander logs <task-id>` subcommand to retrieve logs for a specific task from the database.
+
+**Files:** `src/log.ts`, `src/cli.ts`, `src/queue.ts` (store logs per task)
+**Verify:** `bun run typecheck` passes.
+
+### M5.1: Container Nix store caching
+
+Add a shared Nix store volume that persists across container runs. When a container is created, mount the shared volume at `/nix/store` so that `nix develop` can reuse previously-built derivations. This dramatically speeds up container startup for repos that have been built before.
+
+**Files:** `src/container.ts`, `src/config.ts`
+**Verify:** `bun run typecheck` passes.
+
+### M5.2: Orphan container cleanup on startup
+
+On startup, scan for running podman containers matching the `commander-*` naming pattern that aren't tracked in the task queue. Stop and remove them. Add a `commander cleanup` CLI subcommand that does this on demand.
+
+**Files:** `src/container.ts`, `src/cli.ts`
+**Verify:** `bun run typecheck` passes.
 
 ## Tech Stack
 
-- **Language:** TypeScript (Node.js)
+- **Language:** TypeScript, run with Bun
 - **Container runtime:** Podman (rootless)
-- **Environment management:** Nix flakes + agentkit
+- **Environment management:** Nix flakes (flake-parts)
 - **Agent runtime:** opencode (headless server mode + SDK)
-- **Database:** SQLite (via better-sqlite3 or drizzle)
-- **GitHub API:** Octokit
+- **Database:** SQLite (via bun:sqlite built-in)
+- **GitHub API:** `gh` CLI (Octokit planned for later milestones)
 - **Secrets:** 1Password CLI (`op run`)
-- **Interface:** MCP server (consumed by opencode)
-- **Build:** Nix flake for the commander itself
+- **Interface:** MCP server (consumed by opencode, via @modelcontextprotocol/sdk)
+- **Build:** Nix flake for the dev shell
 
 ## Decisions Log
 
